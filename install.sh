@@ -32,20 +32,30 @@ if ! python3 -m pip --version &>/dev/null; then
 fi
 
 # --- install -----------------------------------------------------------------
+SRC_DIR=""
+
 # If running from inside the repo already, use local dir; otherwise clone.
 if [ -f "pyproject.toml" ] && grep -q 'drive-scanner' pyproject.toml 2>/dev/null; then
+    SRC_DIR="."
     info "Installing from local directory..."
-    python3 -m pip install --user --quiet .
 else
     info "Cloning $REPO -> $INSTALL_DIR ..."
     rm -rf "$INSTALL_DIR"
     git clone --depth 1 "$REPO" "$INSTALL_DIR"
+    SRC_DIR="$INSTALL_DIR"
     info "Installing from cloned repo..."
-    python3 -m pip install --user --quiet "$INSTALL_DIR"
 fi
 
+# Ensure setuptools is available for the build (use --no-build-isolation to
+# avoid pulling a broken packaging version from PyPI in isolated builds).
+python3 -m pip install --user --quiet 'setuptools>=68.0,<70.0' 'wheel' 2>/dev/null || true
+python3 -m pip install --user --quiet --no-build-isolation "$SRC_DIR" 2>/dev/null \
+    || python3 -m pip install --user --quiet "$SRC_DIR"
+
+# pyenv needs a rehash to pick up the new script
+command -v pyenv &>/dev/null && pyenv rehash 2>/dev/null || true
+
 # --- verify ------------------------------------------------------------------
-# Check that the drivescan entry point landed somewhere on PATH
 if command -v drivescan &>/dev/null; then
     ok "drivescan installed successfully."
 else
