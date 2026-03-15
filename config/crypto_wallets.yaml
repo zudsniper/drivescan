@@ -1,0 +1,22 @@
+enabled: true
+filenames:
+  - wallet.dat
+  - default_wallet
+  - multibit.properties
+extensions:
+  - .wallet
+  - .key
+  - .aes.json
+directory_indicators:
+  - .bitcoin
+  - .litecoin
+  - .dogecoin
+  - .electrum
+  - .armory
+  - .multibit
+  - .multibit-hd
+  - .ethereum
+  - .monero
+check_file_contents: true
+bitcoin_address_regex: "[13][a-km-zA-HJ-NP-Z1-9]{25,34}"
+wif_private_key_regex: "5[HJK][1-9A-HJ-NP-Za-km-z]{49}"
