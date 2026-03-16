@@ -43,6 +43,11 @@ class BaseFilter(ABC):
         self._matches.append(details)
         return details
 
+    def restore_matches(self, matches: list[dict]) -> None:
+        """Repopulate filter state from saved checkpoint data."""
+        self._matches = list(matches)
+        self._match_count = len(matches)
+
     @property
     def match_count(self) -> int:
         return self._match_count

@@ -1,6 +1,6 @@
 # drivescan
 
-CLI tool to analyze attached drives and scan filesystems for files matching configurable filter rules.
+CLI tool to analyze attached drives and scan filesystems for files matching configurable filter rules. Features a Rich-based TUI with live progress, pause/resume support, and drive change detection.
 
 ## Quick Install
 
@@ -26,7 +26,7 @@ pip install .
 # List all attached drives
 drivescan drives
 
-# Scan specific paths with all enabled filters
+# Scan specific paths with all enabled filters (launches TUI)
 drivescan scan -p /Volumes/USB -p /mnt/backup
 
 # Scan with a specific filter only
@@ -38,12 +38,50 @@ drivescan scan
 # Save results to JSON
 drivescan scan -p /Volumes/USB -o results.json
 
-# Show verbose progress
-drivescan scan -p /Volumes/USB -v
+# Disable TUI, use legacy text output
+drivescan scan -p /Volumes/USB --no-tui
+
+# Show verbose progress (legacy mode)
+drivescan scan -p /Volumes/USB --no-tui -v
 
 # Show config for a filter
 drivescan config documents
 ```
+
+## TUI
+
+When run in an interactive terminal, `drivescan scan` launches a Rich-based TUI showing:
+
+- **Live progress**: files scanned, scan rate, ETA, elapsed/paused time
+- **Per-drive status**: which path is currently being scanned
+- **Match summary**: counts per filter with type breakdown
+- **Recent matches**: last 8 matches with file type and confidence
+
+### Keyboard Controls
+
+| Key | Action |
+|-----|--------|
+| `p` / `Space` | Toggle pause/resume |
+| `Ctrl+C` x4 | Quit (saves state for resume) |
+
+The TUI auto-disables when output is piped (non-TTY). Use `--no-tui` to force legacy text mode.
+
+## Pause / Resume
+
+Scans automatically checkpoint every 30 seconds. If interrupted (Ctrl+C x4), state is saved to `~/.local/share/drivescan/scans/`.
+
+```bash
+# Resume the most recent interrupted scan
+drivescan resume
+
+# Or use the --resume flag on scan
+drivescan scan --resume
+
+# Custom state directory
+drivescan resume --state-dir /path/to/state
+```
+
+On resume, drivescan detects drive changes (added, removed, or modified drives) and warns before continuing.
 
 ## Filters
 
@@ -80,7 +118,7 @@ verify_magic_bytes: true
 
 - Python 3.10+
 - macOS or Linux
-- Dependencies: `typer`, `pyyaml`, `psutil` (installed automatically)
+- Dependencies: `typer`, `pyyaml`, `psutil`, `rich` (installed automatically)
 
 ## License
 

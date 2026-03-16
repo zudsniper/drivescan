@@ -1,12 +1,13 @@
-"""Core file scanning engine."""
+"""Core file scanning engine — backwards-compatible wrapper around scan_engine."""
 
 import json
-import os
 import time
 from pathlib import Path
 
 from . import colors
 from .filters import BaseFilter
+from .scan_engine import run_scan
+from .scan_state import ScanState
 
 
 def scan_paths(
@@ -20,77 +21,31 @@ def scan_paths(
 
     Returns a summary dict with scan statistics and all matches.
     """
-    total_files = 0
-    total_matches = 0
-    total_errors = 0
-    start_time = time.time()
-
     colors.header("Scanning")
     filter_names = ", ".join(f.name for f in filters)
     colors.info(f"Active filters: {filter_names}")
     colors.info(f"Scanning {len(paths)} path(s)...")
     print()
 
+    # Validate paths
+    valid_paths = []
     for scan_path in paths:
         if not scan_path.exists():
             colors.warn(f"Path does not exist: {scan_path}")
-            continue
-        if not scan_path.is_dir():
+        elif not scan_path.is_dir():
             colors.warn(f"Not a directory: {scan_path}")
-            continue
+        else:
+            colors.info(f"Scanning: {scan_path}")
+            valid_paths.append(scan_path)
 
-        colors.info(f"Scanning: {scan_path}")
+    # Create state and run scan synchronously
+    state = ScanState()
+    run_scan(state, valid_paths, filters, max_depth=max_depth)
 
-        for dirpath, dirnames, filenames in os.walk(scan_path, onerror=lambda e: None):
-            current = Path(dirpath)
-
-            # Enforce max depth
-            if max_depth is not None:
-                depth = len(current.relative_to(scan_path).parts)
-                if depth >= max_depth:
-                    dirnames.clear()
-                    continue
-
-            # Skip system/hidden dirs that are unlikely to contain user files
-            dirnames[:] = [
-                d for d in dirnames
-                if not d.startswith(".")
-                or d.lower() in {
-                    ".bitcoin", ".litecoin", ".dogecoin", ".electrum",
-                    ".armory", ".multibit", ".multibit-hd",
-                    ".ethereum", ".monero",
-                }
-            ]
-
-            for filename in filenames:
-                file_path = current / filename
-                total_files += 1
-
-                if verbose and total_files % 10000 == 0:
-                    colors.info(f"  ...scanned {total_files} files")
-
-                try:
-                    stat = file_path.lstat()
-                except OSError:
-                    total_errors += 1
-                    continue
-
-                # Skip symlinks
-                if os.path.islink(file_path):
-                    continue
-
-                for filt in filters:
-                    try:
-                        result = filt.match(file_path, stat)
-                    except Exception:
-                        total_errors += 1
-                        continue
-
-                    if result:
-                        total_matches += 1
-                        _print_match(filt, result)
-
-    elapsed = time.time() - start_time
+    elapsed = time.time() - state.progress.start_time if state.progress.start_time else 0.0
+    total_files = state.progress.files_scanned
+    total_errors = state.progress.errors
+    total_matches = sum(state.progress.matches_per_filter.values())
 
     # Print summaries
     colors.header("Results")
@@ -103,7 +58,7 @@ def scan_paths(
     if total_errors:
         colors.warn(f"Errors (permission/read): {total_errors:,}")
 
-    # Write JSON output
+    # Collect results
     all_results = {}
     for filt in filters:
         all_results[filt.name] = filt.matches

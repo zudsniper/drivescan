@@ -106,6 +106,32 @@ def analyze_drives() -> list[DriveInfo]:
     return drives
 
 
+def snapshot_drives() -> list["DriveSnapshot"]:
+    """Return drive info with raw byte sizes for serialization and comparison."""
+    from .scan_state import DriveSnapshot
+
+    snapshots: list[DriveSnapshot] = []
+    for part in psutil.disk_partitions(all=True):
+        size_bytes = 0
+        if part.mountpoint:
+            try:
+                usage = psutil.disk_usage(part.mountpoint)
+                size_bytes = usage.total
+            except (PermissionError, OSError):
+                pass
+
+        label = _get_label(part.device, part.mountpoint)
+        snapshots.append(DriveSnapshot(
+            device=part.device,
+            mount_point=part.mountpoint or "",
+            filesystem=part.fstype or None,
+            label=label,
+            size_bytes=size_bytes,
+        ))
+
+    return snapshots
+
+
 def print_drive_table(drives: list[DriveInfo]) -> None:
     if not drives:
         colors.warn("No drives detected.")
