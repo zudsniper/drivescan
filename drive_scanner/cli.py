@@ -9,17 +9,43 @@ import typer
 import yaml
 
 from . import colors
-from .drive_analyzer import analyze_drives, print_drive_table, snapshot_drives
+from .drive_analyzer import analyze_drives, get_root_device_prefix, print_drive_table, snapshot_drives
 from .filters import discover_filters
 from .scanner import scan_paths
+
+def _is_interactive() -> bool:
+    import os
+    try:
+        return os.isatty(sys.stdin.fileno()) and os.isatty(sys.stdout.fileno())
+    except (AttributeError, OSError):
+        return sys.stdout.isatty()
+
 
 app = typer.Typer(
     name="drive-scanner",
     help="Analyze drives and scan for files matching configurable filter rules.",
-    no_args_is_help=True,
+    no_args_is_help=False,
+    invoke_without_command=True,
 )
 
 DEFAULT_CONFIG_DIR = Path(__file__).parent.parent / "config"
+
+
+@app.callback(invoke_without_command=True)
+def _default(ctx: typer.Context):
+    """Launch interactive dashboard when no subcommand is given."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if _is_interactive():
+        from .dashboard import DashboardTUI
+        dashboard = DashboardTUI()
+        action = dashboard.run()
+        if action == "scan":
+            # Invoke the scan command
+            ctx.invoke(scan)
+    else:
+        # Non-interactive: show help
+        print(ctx.get_help())
 
 
 @app.command()
@@ -58,6 +84,9 @@ def scan(
     resume: Annotated[
         bool, typer.Option("--resume", "-r", help="Resume previous scan from checkpoint")
     ] = False,
+    include_boot: Annotated[
+        bool, typer.Option("--include-boot", help="Include boot disk in auto-detected scan targets")
+    ] = False,
     state_dir: Annotated[
         Optional[Path], typer.Option("--state-dir", help="Override state directory")
     ] = None,
@@ -67,7 +96,7 @@ def scan(
         colors.disable()
 
     # Auto-disable TUI if not a TTY
-    use_tui = not no_tui and sys.stdout.isatty()
+    use_tui = not no_tui and _is_interactive()
 
     # Handle resume
     if resume:
@@ -113,10 +142,13 @@ def scan(
         colors.info("No paths specified, detecting mounted drives...")
         drive_list = analyze_drives()
         print_drive_table(drive_list)
+        root_prefix = None if include_boot else get_root_device_prefix()
         scan_targets = [
             Path(d.mount_point)
             for d in drive_list
-            if d.mount_point and d.mount_point != "/"
+            if d.mount_point
+            and d.mount_point != "/"
+            and (root_prefix is None or not d.device.startswith(root_prefix))
         ]
         if not scan_targets:
             colors.warn("No non-root mount points found. Use --path to specify a scan target.")
@@ -289,7 +321,7 @@ def resume_scan(
     ] = False,
 ):
     """Resume the most recent interrupted scan."""
-    use_tui = not no_tui and sys.stdout.isatty()
+    use_tui = not no_tui and _is_interactive()
     _handle_resume(config_dir, None, None, use_tui, state_dir)
 
 
@@ -332,6 +364,138 @@ def config(
     with open(config_file) as f:
         content = f.read()
     print(content)
+
+
+@app.command()
+def raid():
+    """Show detected RAID arrays and external enclosures."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from .enclosure_detector import detect_enclosures
+    from .raid_detector import detect_raid_arrays
+
+    console = Console()
+
+    arrays = detect_raid_arrays()
+    enclosures = detect_enclosures()
+
+    if arrays:
+        table = Table(title="RAID Arrays")
+        table.add_column("Array", style="bold")
+        table.add_column("Level", style="cyan")
+        table.add_column("Status")
+        table.add_column("Members", justify="right")
+        table.add_column("Size")
+        table.add_column("Source", style="dim")
+
+        for arr in arrays:
+            status_style = {
+                "healthy": "green", "degraded": "yellow",
+                "failed": "red", "rebuilding": "yellow",
+            }.get(arr.status, "white")
+            table.add_row(
+                arr.name,
+                arr.raid_level,
+                f"[{status_style}]{arr.status.upper()}[/{status_style}]",
+                str(len(arr.members)),
+                arr.usable_capacity or arr.total_size or "-",
+                arr.source,
+            )
+
+        console.print(table)
+        console.print()
+
+        # Show members for each array
+        for arr in arrays:
+            if arr.members:
+                mtable = Table(title=f"{arr.name} Members")
+                mtable.add_column("Device", style="cyan")
+                mtable.add_column("Role")
+                mtable.add_column("Status")
+                for m in arr.members:
+                    status_style = "green" if m.status == "online" else "red"
+                    mtable.add_row(m.device, m.role, f"[{status_style}]{m.status}[/{status_style}]")
+                console.print(mtable)
+                console.print()
+    else:
+        console.print("[dim]No RAID arrays detected.[/dim]")
+        console.print()
+
+    if enclosures:
+        etable = Table(title="External Enclosures")
+        etable.add_column("Vendor", style="bold")
+        etable.add_column("Model")
+        etable.add_column("Connection", style="cyan")
+        etable.add_column("Inferred RAID")
+        etable.add_column("Confidence")
+        etable.add_column("Reasoning", style="dim")
+
+        for enc in enclosures:
+            conf_style = {"high": "green", "medium": "yellow", "low": "red"}.get(enc.confidence, "white")
+            etable.add_row(
+                enc.vendor,
+                enc.model,
+                enc.connection,
+                enc.inferred_raid or "N/A",
+                f"[{conf_style}]{enc.confidence}[/{conf_style}]",
+                enc.reasoning,
+            )
+        console.print(etable)
+    else:
+        console.print("[dim]No external enclosures detected.[/dim]")
+    console.print()
+
+
+@app.command()
+def recovery():
+    """Show data recovery guidance based on detected RAID and enclosures."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+
+    from .drive_analyzer import analyze_drives
+    from .enclosure_detector import detect_enclosures
+    from .raid_detector import detect_raid_arrays
+    from .recovery import generate_recovery_plans
+
+    console = Console()
+    console.print("[dim]Analyzing system...[/dim]")
+
+    arrays = detect_raid_arrays()
+    enclosures = detect_enclosures()
+    drives = analyze_drives()
+    plans = generate_recovery_plans(arrays, enclosures, drives)
+
+    for plan in plans:
+        severity_style = {
+            "info": "blue", "warning": "yellow", "critical": "red",
+        }.get(plan.severity, "white")
+
+        lines = []
+        for step in plan.steps:
+            lines.append(f"  [bold]{step.order}.[/bold] {step.title}")
+            lines.append(f"     {step.description}")
+            if step.command:
+                lines.append(f"     [cyan]$ {step.command}[/cyan]")
+            if step.warning:
+                lines.append(f"     [yellow]Warning: {step.warning}[/yellow]")
+            lines.append("")
+
+        if plan.warnings:
+            lines.append("[bold red]Warnings:[/bold red]")
+            for w in plan.warnings:
+                lines.append(f"  [red]! {w}[/red]")
+
+        if plan.recommended_tools:
+            lines.append(f"\n[dim]Recommended tools: {', '.join(plan.recommended_tools)}[/dim]")
+
+        console.print(Panel(
+            Text.from_markup("\n".join(lines)),
+            title=f"[bold]{plan.scenario}[/bold]",
+            border_style=severity_style,
+        ))
+        console.print()
 
 
 def main():

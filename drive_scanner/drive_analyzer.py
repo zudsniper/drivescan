@@ -1,6 +1,7 @@
 """Detect attached drives and their filesystem types."""
 
 import platform
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,8 @@ class DriveInfo:
     size: str | None
     used: str | None
     free: str | None
+    is_boot_disk: bool = False
+    connection_type: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -29,6 +32,8 @@ class DriveInfo:
             "size": self.size,
             "used": self.used,
             "free": self.free,
+            "is_boot_disk": self.is_boot_disk,
+            "connection_type": self.connection_type,
         }
 
 
@@ -73,9 +78,54 @@ def _get_label(device: str, mount_point: str) -> str | None:
     return None
 
 
+def get_root_device_prefix() -> str | None:
+    """Return base device name of the disk containing '/' (e.g. '/dev/disk1')."""
+    for part in psutil.disk_partitions(all=True):
+        if part.mountpoint == "/":
+            device = part.device
+            base = re.sub(r's\d+$', '', device)   # macOS: disk1s6 -> disk1
+            if base == device:
+                base = re.sub(r'\d+$', '', device) # Linux: sda1 -> sda
+            return base
+    return None
+
+
+def _get_connection_type(device: str) -> str:
+    """Detect connection type (USB, Thunderbolt, SATA, NVMe, etc.)."""
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            result = subprocess.run(
+                ["diskutil", "info", "-plist", device],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                import plistlib
+                info = plistlib.loads(result.stdout.encode())
+                bus = info.get("BusProtocol", "")
+                if bus:
+                    return bus
+        elif system == "Linux":
+            # Extract base device name (e.g. sda from /dev/sda1)
+            dev_name = device.split("/")[-1]
+            dev_name = re.sub(r'\d+$', '', dev_name)
+            result = subprocess.run(
+                ["lsblk", "-n", "-o", "TRAN", f"/dev/{dev_name}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                tran = result.stdout.strip()
+                if tran:
+                    return tran
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, Exception):
+        pass
+    return ""
+
+
 def analyze_drives() -> list[DriveInfo]:
     """Detect all mounted partitions using psutil."""
     drives: list[DriveInfo] = []
+    root_prefix = get_root_device_prefix()
 
     for part in psutil.disk_partitions(all=True):
         size_str = None
@@ -93,6 +143,13 @@ def analyze_drives() -> list[DriveInfo]:
 
         label = _get_label(part.device, part.mountpoint)
 
+        # Determine if this is a boot disk partition
+        is_boot = False
+        if root_prefix:
+            is_boot = part.device.startswith(root_prefix)
+
+        connection = _get_connection_type(part.device)
+
         drives.append(DriveInfo(
             device=part.device,
             mount_point=part.mountpoint or None,
@@ -101,6 +158,8 @@ def analyze_drives() -> list[DriveInfo]:
             size=size_str,
             used=used_str,
             free=free_str,
+            is_boot_disk=is_boot,
+            connection_type=connection,
         ))
 
     return drives
