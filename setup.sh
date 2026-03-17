@@ -35,6 +35,7 @@ if [[ $EUID -ne 0 ]]; then
         SCAN_SESSION="$SCAN_SESSION" \
         SKIP_SCAN="${SKIP_SCAN:-}" \
         SUDO_USER="${SUDO_USER:-$USER}" \
+        HOME="${HOME}" \
         bash "$0" "$@"
 fi
 
@@ -52,6 +53,8 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     ntfs-3g \
     python3-pip \
     python3-venv \
+    python3-full \
+    pipx \
     tmux \
     git \
     util-linux \
@@ -212,6 +215,46 @@ else
 
     ok "Scan started in tmux session '$SCAN_SESSION'."
     ok "Reattach with: tmux attach -t $SCAN_SESSION"
+fi
+
+# ── 9. Boot notification service ─────────────────────────────────────────────
+header "Boot notification"
+
+if [[ -z "${DRIVESCAN_WEBHOOK_URL:-}" ]]; then
+    warn "No DRIVESCAN_WEBHOOK_URL — skipping boot notification service."
+else
+    # Write a tiny notify script with the URL baked in
+    NOTIFY_SCRIPT="/usr/local/bin/drivescan-boot-notify"
+    cat > "$NOTIFY_SCRIPT" <<SCRIPT
+#!/usr/bin/env bash
+HOST=\$(hostname)
+UPTIME=\$(uptime -s 2>/dev/null || date)
+curl -s -X POST \\
+    -H "Content-Type: application/json" \\
+    -d "{\"content\":\"⚡ **\$HOST rebooted** at \$UPTIME — scan is NOT running.\\nSSH in and run: \`tmux new -s scan && drivescan resume --no-tui\`\"}" \\
+    "${DRIVESCAN_WEBHOOK_URL}" || true
+SCRIPT
+    chmod +x "$NOTIFY_SCRIPT"
+
+    # Install systemd unit
+    cat > /etc/systemd/system/drivescan-boot-notify.service <<UNIT
+[Unit]
+Description=drivescan boot notification
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${NOTIFY_SCRIPT}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    systemctl daemon-reload
+    systemctl enable drivescan-boot-notify.service
+    ok "Boot notification service installed — you'll get a Discord ping on every reboot."
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────

@@ -30,10 +30,23 @@ if [ "$(uname)" = "Linux" ]; then
     info "For NTFS drive support: sudo apt install ntfs-3g"
 fi
 
-# pip
-if ! python3 -m pip --version &>/dev/null; then
-    err "pip not found. Install pip and re-run."
+# pip / pipx — Ubuntu 23.04+ blocks pip system-wide (PEP 668); use pipx if available
+USE_PIPX=0
+if command -v pipx &>/dev/null; then
+    USE_PIPX=1
+    info "Using pipx for install."
+elif python3 -m pip --version &>/dev/null 2>&1; then
+    info "Using pip for install."
+else
+    err "Neither pipx nor pip found. Run: sudo apt install pipx"
     exit 1
+fi
+
+# pip flags that work on both old and new Ubuntu
+PIP_FLAGS="--user --quiet"
+# Ubuntu 23.04+ (PEP 668) requires this flag when not in a venv
+if python3 -m pip install --help 2>&1 | grep -q 'break-system-packages'; then
+    PIP_FLAGS="$PIP_FLAGS --break-system-packages"
 fi
 
 # --- install -----------------------------------------------------------------
@@ -51,11 +64,17 @@ else
     info "Installing from cloned repo..."
 fi
 
-# Ensure setuptools is available for the build (use --no-build-isolation to
-# avoid pulling a broken packaging version from PyPI in isolated builds).
-python3 -m pip install --user --quiet 'setuptools>=68.0,<70.0' 'wheel' 2>/dev/null || true
-python3 -m pip install --user --quiet --no-build-isolation "$SRC_DIR" 2>/dev/null \
-    || python3 -m pip install --user --quiet "$SRC_DIR"
+if [ "$USE_PIPX" = "1" ]; then
+    pipx install --force "$SRC_DIR" 2>/dev/null \
+        || pipx install "$SRC_DIR"
+else
+    # Ensure setuptools is available for the build
+    # shellcheck disable=SC2086
+    python3 -m pip install $PIP_FLAGS 'setuptools>=68.0,<70.0' 'wheel' 2>/dev/null || true
+    # shellcheck disable=SC2086
+    python3 -m pip install $PIP_FLAGS --no-build-isolation "$SRC_DIR" 2>/dev/null \
+        || python3 -m pip install $PIP_FLAGS "$SRC_DIR"
+fi
 
 # pyenv needs a rehash to pick up the new script
 command -v pyenv &>/dev/null && pyenv rehash 2>/dev/null || true
