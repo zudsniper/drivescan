@@ -1,6 +1,7 @@
 """Detect attached drives and their filesystem types."""
 
 import platform
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +71,18 @@ def _get_label(device: str, mount_point: str) -> str | None:
     # Fallback: use the last component of the mount point
     if mount_point and mount_point != "/":
         return Path(mount_point).name
+    return None
+
+
+def get_root_device_prefix() -> str | None:
+    """Return base device name of the disk containing '/' (e.g. '/dev/disk1')."""
+    for part in psutil.disk_partitions(all=True):
+        if part.mountpoint == "/":
+            device = part.device
+            base = re.sub(r's\d+$', '', device)   # macOS: disk1s6 -> disk1
+            if base == device:
+                base = re.sub(r'\d+$', '', device) # Linux: sda1 -> sda
+            return base
     return None
 
 

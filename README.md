@@ -114,6 +114,66 @@ max_size_bytes: null
 verify_magic_bytes: true
 ```
 
+## Discord Webhooks
+
+Get notified in Discord when scans start, complete, hit error thresholds, or get interrupted.
+
+```bash
+# Via command line flag
+drivescan scan -p /mnt/drive1 --webhook-url "https://discord.com/api/webhooks/YOUR/URL"
+
+# Via environment variable
+export DRIVESCAN_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR/URL"
+drivescan scan -p /mnt/drive1
+
+# Works with resume too
+drivescan resume --webhook-url "$DRIVESCAN_WEBHOOK_URL"
+```
+
+Notifications sent:
+- **Scan Started** (blue) — paths and filters being used
+- **Scan Complete** (green) — files scanned, matches, errors, elapsed time, per-filter breakdown
+- **Error Threshold** (red) — at 100, 500, 1000, then every 1000 errors
+- **Scan Interrupted** (yellow) — progress so far + how to resume
+
+To create a Discord webhook: Server Settings → Integrations → Webhooks → New Webhook → Copy URL.
+
+## Headless / Remote Usage
+
+For running unattended on a remote machine (e.g. over SSH):
+
+```bash
+# Start inside tmux so it survives SSH disconnect
+tmux new -s scan
+export DRIVESCAN_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR/URL"
+drivescan scan -p /mnt/drive1 --no-tui 2>&1 | tee /tmp/drivescan.log
+# Detach: Ctrl+B, then D
+
+# Reconnect later
+tmux attach -t scan
+```
+
+The `--no-tui` flag is recommended for headless use. Combined with `--webhook-url`, you get Discord notifications without needing to watch the terminal.
+
+## Linux / NTFS Support
+
+drivescan works on Linux. For scanning NTFS drives:
+
+```bash
+# Install NTFS support
+sudo apt install ntfs-3g
+
+# Find and mount NTFS drives
+lsblk -f
+sudo mkdir -p /mnt/drive1
+sudo mount -t ntfs-3g /dev/sdX1 /mnt/drive1
+
+# Scan
+drivescan scan -p /mnt/drive1
+```
+
+The installer (`install.sh`) will remind you to install `ntfs-3g` on Linux.
+
 ## Requirements
 
 - Python 3.10+

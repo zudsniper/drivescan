@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .filters import BaseFilter
 from .scan_state import ScanState
+from .webhook import maybe_notify_errors
 
 # Hidden dirs to skip, except known crypto wallet dirs
 CRYPTO_DIRS = {
@@ -131,6 +132,7 @@ def run_scan(
                 except OSError:
                     with state.lock:
                         state.progress.errors += 1
+                    maybe_notify_errors(state)
                     continue
 
                 # Skip symlinks
@@ -146,6 +148,7 @@ def run_scan(
                     except Exception:
                         with state.lock:
                             state.progress.errors += 1
+                        maybe_notify_errors(state)
                         continue
 
                     if result:

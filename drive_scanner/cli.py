@@ -9,9 +9,17 @@ import typer
 import yaml
 
 from . import colors
-from .drive_analyzer import analyze_drives, print_drive_table, snapshot_drives
+from .drive_analyzer import analyze_drives, get_root_device_prefix, print_drive_table, snapshot_drives
 from .filters import discover_filters
 from .scanner import scan_paths
+
+def _is_interactive() -> bool:
+    import os
+    try:
+        return os.isatty(sys.stdin.fileno()) and os.isatty(sys.stdout.fileno())
+    except (AttributeError, OSError):
+        return sys.stdout.isatty()
+
 
 app = typer.Typer(
     name="drive-scanner",
@@ -55,11 +63,17 @@ def scan(
     no_tui: Annotated[
         bool, typer.Option("--no-tui", help="Disable TUI, use legacy text output")
     ] = False,
+    include_boot: Annotated[
+        bool, typer.Option("--include-boot", help="Include boot disk in auto-detected scan targets")
+    ] = False,
     resume: Annotated[
         bool, typer.Option("--resume", "-r", help="Resume previous scan from checkpoint")
     ] = False,
     state_dir: Annotated[
         Optional[Path], typer.Option("--state-dir", help="Override state directory")
+    ] = None,
+    webhook_url: Annotated[
+        Optional[str], typer.Option("--webhook-url", help="Discord webhook URL for notifications", envvar="DRIVESCAN_WEBHOOK_URL")
     ] = None,
 ):
     """Scan paths with selected filters to find matching files."""
@@ -67,11 +81,11 @@ def scan(
         colors.disable()
 
     # Auto-disable TUI if not a TTY
-    use_tui = not no_tui and sys.stdout.isatty()
+    use_tui = not no_tui and _is_interactive()
 
     # Handle resume
     if resume:
-        _handle_resume(config_dir, output, max_depth, use_tui, state_dir)
+        _handle_resume(config_dir, output, max_depth, use_tui, state_dir, webhook_url)
         return
 
     # Discover and select filters
@@ -113,19 +127,29 @@ def scan(
         colors.info("No paths specified, detecting mounted drives...")
         drive_list = analyze_drives()
         print_drive_table(drive_list)
+        root_prefix = None if include_boot else get_root_device_prefix()
         scan_targets = [
             Path(d.mount_point)
             for d in drive_list
-            if d.mount_point and d.mount_point != "/"
+            if d.mount_point
+            and d.mount_point != "/"
+            and (root_prefix is None or not d.device.startswith(root_prefix))
         ]
         if not scan_targets:
             colors.warn("No non-root mount points found. Use --path to specify a scan target.")
             raise typer.Exit(1)
 
     if use_tui:
-        _run_with_tui(scan_targets, active_filters, max_depth, output, state_dir)
+        _run_with_tui(scan_targets, active_filters, max_depth, output, state_dir, webhook_url)
     else:
-        scan_paths(scan_targets, active_filters, max_depth=max_depth, verbose=verbose, output_file=output)
+        from .webhook import notify_scan_start, notify_scan_complete, notify_scan_interrupted
+        notify_scan_start(webhook_url, [str(p) for p in scan_targets], [f.name for f in active_filters])
+        try:
+            scan_paths(scan_targets, active_filters, max_depth=max_depth, verbose=verbose, output_file=output)
+            notify_scan_complete(webhook_url, 0, 0, 0, 0.0, {})
+        except (KeyboardInterrupt, SystemExit):
+            notify_scan_interrupted(webhook_url, 0, 0, None)
+            raise
 
 
 def _run_with_tui(
@@ -134,13 +158,16 @@ def _run_with_tui(
     max_depth: int | None,
     output: Path | None,
     state_dir: Path | None,
+    webhook_url: str | None = None,
 ) -> None:
     """Run scan with Rich TUI display."""
     import json
+    import time as _time
 
     from .scan_engine import run_scan
     from .scan_state import ScanState
     from .tui import ScanTUI
+    from .webhook import notify_scan_start, notify_scan_complete, notify_scan_interrupted
 
     state = ScanState()
     state_file = ScanState.state_file_for_paths(scan_targets, state_dir)
@@ -148,6 +175,7 @@ def _run_with_tui(
         "paths": [str(p) for p in scan_targets],
         "max_depth": max_depth,
         "state_file": str(state_file),
+        "webhook_url": webhook_url,
     }
 
     # Take drive snapshot
@@ -160,8 +188,27 @@ def _run_with_tui(
     )
     scanner_thread.start()
 
+    notify_scan_start(webhook_url, [str(p) for p in scan_targets], [f.name for f in active_filters])
+
     tui = ScanTUI(state, active_filters)
     tui.run(scanner_thread)
+
+    # Post-scan webhook
+    elapsed = (
+        (_time.time() - state.progress.start_time - state.progress.elapsed_paused)
+        if state.progress.start_time else 0
+    )
+    total_matches = sum(state.progress.matches_per_filter.values())
+    if state.finished:
+        notify_scan_complete(
+            webhook_url, state.progress.files_scanned, total_matches,
+            state.progress.errors, elapsed, dict(state.progress.matches_per_filter),
+        )
+    else:
+        notify_scan_interrupted(
+            webhook_url, state.progress.files_scanned, total_matches,
+            state.scan_config.get("state_file"),
+        )
 
     # Write JSON output if requested
     if output:
@@ -191,11 +238,15 @@ def _handle_resume(
     max_depth: int | None,
     use_tui: bool,
     state_dir: Path | None,
+    webhook_url: str | None = None,
 ) -> None:
     """Handle --resume flag: load state, detect drive changes, continue scan."""
+    import time as _time
+
     from .drive_change import detect_drive_changes
     from .scan_engine import run_scan
     from .scan_state import ScanState
+    from .webhook import notify_scan_start, notify_scan_complete, notify_scan_interrupted
 
     # Find latest state file
     state_file = ScanState.find_latest_state(state_dir)
@@ -206,6 +257,8 @@ def _handle_resume(
     colors.info(f"Loading state from {state_file}")
     state = ScanState.load(state_file)
     state.scan_config["state_file"] = str(state_file)
+    if webhook_url:
+        state.scan_config["webhook_url"] = webhook_url
 
     # Detect drive changes
     current_drives = snapshot_drives()
@@ -247,6 +300,8 @@ def _handle_resume(
     colors.info(f"Resuming scan: {state.progress.files_scanned:,} files already scanned, "
                 f"{len(state.completed_dirs):,} dirs completed")
 
+    notify_scan_start(webhook_url, [str(p) for p in scan_targets], [f.name for f in active_filters])
+
     if use_tui:
         import threading
         from .tui import ScanTUI
@@ -275,6 +330,23 @@ def _handle_resume(
         if state.progress.errors:
             colors.warn(f"Errors: {state.progress.errors:,}")
 
+    # Post-scan webhook
+    elapsed = (
+        (_time.time() - state.progress.start_time - state.progress.elapsed_paused)
+        if state.progress.start_time else 0
+    )
+    total_matches = sum(state.progress.matches_per_filter.values())
+    if state.finished:
+        notify_scan_complete(
+            webhook_url, state.progress.files_scanned, total_matches,
+            state.progress.errors, elapsed, dict(state.progress.matches_per_filter),
+        )
+    else:
+        notify_scan_interrupted(
+            webhook_url, state.progress.files_scanned, total_matches,
+            state.scan_config.get("state_file"),
+        )
+
 
 @app.command("resume")
 def resume_scan(
@@ -287,10 +359,13 @@ def resume_scan(
     no_tui: Annotated[
         bool, typer.Option("--no-tui", help="Disable TUI, use legacy text output")
     ] = False,
+    webhook_url: Annotated[
+        Optional[str], typer.Option("--webhook-url", help="Discord webhook URL for notifications", envvar="DRIVESCAN_WEBHOOK_URL")
+    ] = None,
 ):
     """Resume the most recent interrupted scan."""
-    use_tui = not no_tui and sys.stdout.isatty()
-    _handle_resume(config_dir, None, None, use_tui, state_dir)
+    use_tui = not no_tui and _is_interactive()
+    _handle_resume(config_dir, None, None, use_tui, state_dir, webhook_url)
 
 
 @app.command("filters")

@@ -25,6 +25,11 @@ if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }
 fi
 info "Python $PY_VER found."
 
+# Linux-specific hints
+if [ "$(uname)" = "Linux" ]; then
+    info "For NTFS drive support: sudo apt install ntfs-3g"
+fi
+
 # pip
 if ! python3 -m pip --version &>/dev/null; then
     err "pip not found. Install pip and re-run."
