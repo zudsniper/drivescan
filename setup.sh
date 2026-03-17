@@ -195,6 +195,11 @@ if [[ -n "${SKIP_SCAN:-}" ]]; then
 elif [[ -z "${DRIVESCAN_WEBHOOK_URL:-}" ]]; then
     warn "No DRIVESCAN_WEBHOOK_URL set — skipping auto-start."
     warn "Set it and run: tmux new -s $SCAN_SESSION"
+elif [[ ${#SCAN_CMD_PATHS[@]} -eq 0 ]]; then
+    warn "No scan paths found (no NTFS drives mounted) — skipping auto-start."
+    warn "Plug in drives, mount them, then run:"
+    warn "  tmux new -s $SCAN_SESSION"
+    warn "  drivescan scan --no-tui --webhook-url \"\$DRIVESCAN_WEBHOOK_URL\""
 else
     # Kill existing session if present
     sudo -u "$REAL_USER" tmux kill-session -t "$SCAN_SESSION" 2>/dev/null || true
@@ -210,7 +215,8 @@ else
     info "Command: $DSCAN_CMD"
 
     # Create detached tmux session running the scan as REAL_USER
-    sudo -u "$REAL_USER" tmux new-session -d -s "$SCAN_SESSION" \
+    # Force TERM to xterm-256color — tmux rejects exotic terminals (e.g. xterm-kitty)
+    sudo -u "$REAL_USER" env TERM=xterm-256color tmux new-session -d -s "$SCAN_SESSION" \
         "export PATH=\"$USER_BIN:\$PATH\"; $DSCAN_CMD; echo '--- scan finished, press enter to exit ---'; read"
 
     ok "Scan started in tmux session '$SCAN_SESSION'."
